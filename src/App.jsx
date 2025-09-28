@@ -11,23 +11,11 @@ const App = () => {
   const canvasRef = useRef(null);
   const recognitionRef = useRef(null);
 
-  const [personDetected, setPersonDetected] = useState(false);
-  const [step, setStep] = useState("idle");       // idle | waiting | decision | end
+  // "idle" = waiting for face; "interacting" = pausing detection while speaking/recognizing; "end" = after photo/no
+  const [mode, setMode] = useState("idle");
   const [showButton, setShowButton] = useState(false);
-  const [isInteracting, setIsInteracting] = useState(false); // Pause detection when true
 
-  function setupSpeechRecognition(onresult, onerror) {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return null;
-    const rec = new SpeechRecognition();
-    rec.lang = "en-US";
-    rec.continuous = false;
-    rec.interimResults = false;
-    rec.onresult = onresult;
-    rec.onerror = onerror;
-    return rec;
-  }
-
+  // Speak helper (calls callback after speech ends)
   function speak(text, callback) {
     window.speechSynthesis.cancel();
     const utter = new window.SpeechSynthesisUtterance(text);
@@ -40,7 +28,25 @@ const App = () => {
     window.speechSynthesis.speak(utter);
   }
 
-  // Camera and Detection Loop
+  // Microphone setup (returns recognition instance)
+  function setupSpeechRecognition(onresult, onerror) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return null;
+    const rec = new SpeechRecognition();
+    rec.lang = "en-US";
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.onresult = onresult;
+    rec.onerror = onerror;
+    return rec;
+  }
+
+  useEffect(() => {
+    document.body.style.margin = "0";
+    document.body.style.background = "#202040";
+  }, []);
+
+  // Detection loop: runs ONLY in "idle" mode
   useEffect(() => {
     let model;
     let frameId;
@@ -58,44 +64,35 @@ const App = () => {
           await videoRef.current.play();
           model = await blazeface.load();
 
-          // Start detection loop
           const detectPerson = async () => {
-            const now = Date.now();
-            if (isInteracting) {
-              // If user interaction (speech/decision) running, pause detection loop
+            if (mode !== "idle") {
+              // detection paused during "interacting" or "end"
               frameId = requestAnimationFrame(detectPerson);
               return;
             }
+            const now = Date.now();
             if (videoRef.current && model && now - lastDetection > DETECTION_INTERVAL) {
               lastDetection = now;
-
               const predictions = await model.estimateFaces(videoRef.current, false);
               const ctx = canvasRef.current.getContext('2d');
               ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
 
               if (predictions.length > 0) {
-                setPersonDetected(true);
-                setIsInteracting(true); // PAUSE detection now!
+                // PAUSE detection/interactions, show box
+                setMode("interacting");
                 setShowButton(false);
-                setStep("waiting");
-                // Draw box
                 predictions.forEach(face => {
                   const start = face.topLeft, end = face.bottomRight;
                   ctx.strokeStyle = "#3f51b5";
                   ctx.lineWidth = 4;
                   ctx.strokeRect(start[0], start[1], end[0] - start[0], end[1] - start[1]);
                 });
-
-                // Start greeting + mic sequence
+                // GREETING + MIC
                 speak("Welcome to our photography. Would you like to take a photo?", () => {
                   if (recognitionRef.current) recognitionRef.current.abort();
                   recognitionRef.current = setupSpeechRecognition(handleSpeechResult, null);
                   if (recognitionRef.current) recognitionRef.current.start();
                 });
-              } else {
-                setPersonDetected(false);
-                setShowButton(false);
-                setStep("idle");
               }
             }
             frameId = requestAnimationFrame(detectPerson);
@@ -111,38 +108,31 @@ const App = () => {
 
     setupCamera();
     // eslint-disable-next-line
-  }, []); // Only once on mount
+  }, [mode]); // "mode" dependency ensures detection loop resumes after interactions
 
-  // Microphone reply handler
+  // Voice reply flow
   function handleSpeechResult(event) {
     const transcript = event.results[0][0].transcript.toLowerCase();
     if (transcript.includes("yes")) {
       setShowButton(true);
-      setStep("decision");
       speak("Tap or click the button below in the tab to take a photo.");
+      // Remain in 'interacting' mode until photo
     } else {
       setShowButton(false);
-      setStep("end");
-      speak("Thank you for visiting.", resumeDetection);
+      speak("Thank you for visiting.", () => setMode("idle")); // Resume detection!
     }
   }
 
+  // After photo taken, thank and reset system
   function handleCapture() {
     const context = canvasRef.current.getContext('2d');
     context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
     setTimeout(() => {
-      speak("Thank you. Thank you for visiting.", resumeDetection);
-      setShowButton(false);
-      setStep("end");
-    }, 500);
-  }
-
-  // Resume detection after conversation complete
-  function resumeDetection() {
-    setIsInteracting(false); // allows next person to be detected
-    setPersonDetected(false);
-    setShowButton(false);
-    setStep("idle");
+      speak("Thank you. Thank you for visiting.", () => {
+        setShowButton(false);
+        setMode("idle"); // Resume detection for next visitor
+      });
+    }, 450);
   }
 
   return (
@@ -186,7 +176,7 @@ const App = () => {
             zIndex: 3,
           }}
         />
-        {personDetected && <Fade triggerOnce>
+        {mode === "interacting" && <Fade triggerOnce>
           <motion.div
             style={{
               position: "absolute",
@@ -224,7 +214,7 @@ const App = () => {
           </motion.button>
         </Fade>
       )}
-      {step === "end" && (
+      {mode === "end" && (
         <Fade>
           <motion.div
             style={{
