@@ -10,6 +10,22 @@ const App = () => {
   const [personDetected, setPersonDetected] = useState(false);
   const [step, setStep] = useState("start");
   const [showButton, setShowButton] = useState(false);
+  const [hasGreeted, setHasGreeted] = useState(false);
+
+  function speak(text, callback) {
+    window.speechSynthesis.cancel();
+    const utter = new window.SpeechSynthesisUtterance(text);
+    utter.lang = "en-US";
+    utter.rate = 1;
+    utter.pitch = 1;
+    const voices = window.speechSynthesis.getVoices();
+    const enVoice = voices.find(v => v.lang.startsWith("en") && v.localService);
+    if (enVoice) utter.voice = enVoice;
+    utter.onend = () => {
+      if (callback) callback();
+    };
+    window.speechSynthesis.speak(utter);
+  }
 
   useEffect(() => {
     document.body.style.margin = "0";
@@ -25,16 +41,12 @@ const App = () => {
           return;
         }
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
-        // Important: Set props and ready handlers BEFORE play
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.onloadedmetadata = async () => {
-            try {
-              await videoRef.current.play();
-            } catch (err) {
-              console.error("Video play error:", err);
-            }
+            try { await videoRef.current.play(); } catch (err) {}
             model = await blazeface.load();
+
             const detectPerson = async () => {
               if (videoRef.current && model) {
                 const predictions = await model.estimateFaces(videoRef.current, false);
@@ -42,19 +54,26 @@ const App = () => {
                 ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
 
                 if (predictions.length > 0) {
-                  setPersonDetected(true);
-                  setStep("greet");
-                  speak("Welcome to our photography. Would you like to take a photo?");
-                  startSpeechRecognition();
+                  if (!personDetected) setPersonDetected(true);
+
+                  if (!hasGreeted) {
+                    setHasGreeted(true);
+                    setStep("greet");
+                    speak(
+                      "Welcome to our photography. Would you like to take a photo?",
+                      () => startSpeechRecognition()
+                    );
+                  }
+
+                  for (let face of predictions) {
+                    const start = face.topLeft, end = face.bottomRight;
+                    ctx.strokeStyle = "#3f51b5";
+                    ctx.lineWidth = 4;
+                    ctx.strokeRect(start[0], start[1], end[0] - start[0], end[1] - start[1]);
+                  }
                 } else {
                   setPersonDetected(false);
-                }
-
-                for (let face of predictions) {
-                  const start = face.topLeft, end = face.bottomRight;
-                  ctx.strokeStyle = "#3f51b5";
-                  ctx.lineWidth = 4;
-                  ctx.strokeRect(start[0], start[1], end[0] - start[0], end[1] - start[1]);
+                  setHasGreeted(false); // Reset on person leaving
                 }
               }
               requestAnimationFrame(detectPerson);
@@ -68,14 +87,8 @@ const App = () => {
       }
     }
     setupCamera();
-  }, []);
-
-  function speak(text) {
-    window.speechSynthesis.cancel(); // Prevents overlap
-    const utter = new window.SpeechSynthesisUtterance(text);
-    utter.lang = "en-US";
-    window.speechSynthesis.speak(utter);
-  }
+    // eslint-disable-next-line
+  }, [hasGreeted, personDetected]);
 
   function startSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -95,7 +108,7 @@ const App = () => {
         setTimeout(() => {
           speak("Thank you, visit again.");
           setStep("end");
-        }, 1000);
+        }, 600);
       }
     };
     recognition.onerror = () => {};
@@ -108,7 +121,7 @@ const App = () => {
       speak("Thank you!");
       setStep("end");
       setShowButton(false);
-    }, 800);
+    }, 700);
   }
 
   return (
@@ -118,7 +131,7 @@ const App = () => {
     }}>
       <Slide direction="down" triggerOnce>
         <motion.h1
-          style={{ color: "#fff", marginBottom: "20px", fontFamily: 'Poppins,sans-serif' }}
+          style={{ color: "#fff", marginBottom: "20px", fontFamily: "Poppins,sans-serif" }}
           initial={{ scale: 0.8, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
         >Interactive Photography Experience</motion.h1>
