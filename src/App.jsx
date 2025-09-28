@@ -12,11 +12,10 @@ const App = () => {
   const recognitionRef = useRef(null);
 
   const [personDetected, setPersonDetected] = useState(false);
-  const [step, setStep] = useState("start");       // start | greeted | response | end
+  const [step, setStep] = useState("idle");       // idle | waiting | decision | end
   const [showButton, setShowButton] = useState(false);
-  const [hasGreetingSpoken, setHasGreetingSpoken] = useState(false);
+  const [isInteracting, setIsInteracting] = useState(false); // Pause detection when true
 
-  // Helper, always use the same recognition instance
   function setupSpeechRecognition(onresult, onerror) {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) return null;
@@ -35,22 +34,17 @@ const App = () => {
     utter.lang = "en-US";
     utter.rate = 1;
     utter.pitch = 1;
-    // Prefer local english voice
     const voices = window.speechSynthesis.getVoices();
     utter.voice = voices.find(v => v.lang.startsWith("en") && v.localService) || voices[0];
     utter.onend = () => callback && callback();
     window.speechSynthesis.speak(utter);
   }
 
-  useEffect(() => {
-    document.body.style.margin = "0";
-    document.body.style.background = "#202040";
-  }, []);
-
+  // Camera and Detection Loop
   useEffect(() => {
     let model;
-    let lastDetection = 0;
     let frameId;
+    let lastDetection = 0;
 
     async function setupCamera() {
       try {
@@ -59,100 +53,96 @@ const App = () => {
           return;
         }
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.onloadedmetadata = async () => {
-            await videoRef.current.play();
-            model = await blazeface.load();
+        videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = async () => {
+          await videoRef.current.play();
+          model = await blazeface.load();
 
-            const detectPerson = async () => {
-              const now = Date.now();
-              if (videoRef.current && model && now - lastDetection > DETECTION_INTERVAL) {
-                lastDetection = now;
-
-                const predictions = await model.estimateFaces(videoRef.current, false);
-                const ctx = canvasRef.current.getContext('2d');
-                ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-
-                if (predictions.length > 0) {
-                  if (!personDetected) {
-                    setPersonDetected(true);
-                    setShowButton(false);
-                    setHasGreetingSpoken(false);
-                    setStep("greeted");
-                  }
-                  // Draw box
-                  predictions.forEach(face => {
-                    const start = face.topLeft, end = face.bottomRight;
-                    ctx.strokeStyle = "#3f51b5";
-                    ctx.lineWidth = 4;
-                    ctx.strokeRect(start[0], start[1], end[0] - start[0], end[1] - start[1]);
-                  });
-                } else {
-                  if (personDetected) {
-                    setPersonDetected(false);
-                    setShowButton(false);
-                    setHasGreetingSpoken(false);
-                    setStep("start");
-                  }
-                }
-              }
+          // Start detection loop
+          const detectPerson = async () => {
+            const now = Date.now();
+            if (isInteracting) {
+              // If user interaction (speech/decision) running, pause detection loop
               frameId = requestAnimationFrame(detectPerson);
-            };
-            detectPerson();
+              return;
+            }
+            if (videoRef.current && model && now - lastDetection > DETECTION_INTERVAL) {
+              lastDetection = now;
+
+              const predictions = await model.estimateFaces(videoRef.current, false);
+              const ctx = canvasRef.current.getContext('2d');
+              ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+
+              if (predictions.length > 0) {
+                setPersonDetected(true);
+                setIsInteracting(true); // PAUSE detection now!
+                setShowButton(false);
+                setStep("waiting");
+                // Draw box
+                predictions.forEach(face => {
+                  const start = face.topLeft, end = face.bottomRight;
+                  ctx.strokeStyle = "#3f51b5";
+                  ctx.lineWidth = 4;
+                  ctx.strokeRect(start[0], start[1], end[0] - start[0], end[1] - start[1]);
+                });
+
+                // Start greeting + mic sequence
+                speak("Welcome to our photography. Would you like to take a photo?", () => {
+                  if (recognitionRef.current) recognitionRef.current.abort();
+                  recognitionRef.current = setupSpeechRecognition(handleSpeechResult, null);
+                  if (recognitionRef.current) recognitionRef.current.start();
+                });
+              } else {
+                setPersonDetected(false);
+                setShowButton(false);
+                setStep("idle");
+              }
+            }
+            frameId = requestAnimationFrame(detectPerson);
           };
-        }
+          detectPerson();
+        };
       } catch (e) {
         alert("Camera error: " + e.message);
         console.error(e);
       }
       return () => cancelAnimationFrame(frameId);
     }
+
     setupCamera();
     // eslint-disable-next-line
-  }, []);
+  }, []); // Only once on mount
 
-  // SPEECH/VOICE FLOW
-  useEffect(() => {
-    // Only greet once per detection event!
-    if (step === "greeted" && !hasGreetingSpoken && personDetected) {
-      setHasGreetingSpoken(true);
-      speak("Welcome to our photography. Would you like to take a photo?", () => {
-        // Wait for reply
-        if (recognitionRef.current) recognitionRef.current.abort();
-        recognitionRef.current = setupSpeechRecognition(handleSpeechResult, handleSpeechError);
-        if (recognitionRef.current) recognitionRef.current.start();
-      });
-    }
-    // eslint-disable-next-line
-  }, [step, personDetected]);
-
-  // Microphone recognition response handler
+  // Microphone reply handler
   function handleSpeechResult(event) {
-    if (!personDetected) return; // if left, ignore
     const transcript = event.results[0][0].transcript.toLowerCase();
     if (transcript.includes("yes")) {
       setShowButton(true);
-      setStep("response");
-      speak("Please click the button in the tablet to take a photo.");
+      setStep("decision");
+      speak("Tap or click the button below in the tab to take a photo.");
     } else {
       setShowButton(false);
       setStep("end");
-      speak("Thank you for visiting.");
+      speak("Thank you for visiting.", resumeDetection);
     }
-  }
-  function handleSpeechError() {
-    // Optionally add retry or feedback...
   }
 
   function handleCapture() {
     const context = canvasRef.current.getContext('2d');
     context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
     setTimeout(() => {
-      speak("Thank you. Thank you for visiting.");
+      speak("Thank you. Thank you for visiting.", resumeDetection);
       setShowButton(false);
       setStep("end");
     }, 500);
+  }
+
+  // Resume detection after conversation complete
+  function resumeDetection() {
+    setIsInteracting(false); // allows next person to be detected
+    setPersonDetected(false);
+    setShowButton(false);
+    setStep("idle");
   }
 
   return (
