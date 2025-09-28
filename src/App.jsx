@@ -4,26 +4,30 @@ import "@tensorflow/tfjs";
 import { Slide, Fade } from "react-awesome-reveal";
 import { motion } from "framer-motion";
 
+const DETECTION_INTERVAL = 500; // milliseconds
+
 const App = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const [personDetected, setPersonDetected] = useState(false);
   const [step, setStep] = useState("start");
   const [showButton, setShowButton] = useState(false);
-  const [hasGreeted, setHasGreeted] = useState(false);
+  const [hasSpoken, setHasSpoken] = useState(false);
+  const [isListening, setIsListening] = useState(false);
 
+  // Helper: speak only once and callback after done
   function speak(text, callback) {
     window.speechSynthesis.cancel();
     const utter = new window.SpeechSynthesisUtterance(text);
     utter.lang = "en-US";
     utter.rate = 1;
     utter.pitch = 1;
-    const voices = window.speechSynthesis.getVoices();
-    const enVoice = voices.find(v => v.lang.startsWith("en") && v.localService);
-    if (enVoice) utter.voice = enVoice;
     utter.onend = () => {
       if (callback) callback();
     };
+    // Select proper voice
+    const voices = window.speechSynthesis.getVoices();
+    utter.voice = voices.find(v => v.lang.startsWith("en") && v.localService) || voices[0];
     window.speechSynthesis.speak(utter);
   }
 
@@ -34,6 +38,8 @@ const App = () => {
 
   useEffect(() => {
     let model;
+    let lastDetection = 0;
+
     async function setupCamera() {
       try {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -47,33 +53,43 @@ const App = () => {
             try { await videoRef.current.play(); } catch (err) {}
             model = await blazeface.load();
 
+            // Throttled detection loop
             const detectPerson = async () => {
-              if (videoRef.current && model) {
+              const now = Date.now();
+              if (videoRef.current && model && now - lastDetection > DETECTION_INTERVAL) {
+                lastDetection = now;
+
                 const predictions = await model.estimateFaces(videoRef.current, false);
                 const ctx = canvasRef.current.getContext('2d');
                 ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
 
                 if (predictions.length > 0) {
-                  if (!personDetected) setPersonDetected(true);
-
-                  if (!hasGreeted) {
-                    setHasGreeted(true);
+                  if (!personDetected) {
+                    setPersonDetected(true);
                     setStep("greet");
-                    speak(
-                      "Welcome to our photography. Would you like to take a photo?",
-                      () => startSpeechRecognition()
-                    );
+                    setHasSpoken(false);
                   }
 
-                  for (let face of predictions) {
+                  // Only speak once when person is detected
+                  if (!hasSpoken) {
+                    setHasSpoken(true);
+                    speak("Welcome to our photography. Would you like to take a photo?", () => {
+                      setIsListening(true);
+                      startSpeechRecognition();
+                    });
+                  }
+
+                  predictions.forEach(face => {
                     const start = face.topLeft, end = face.bottomRight;
                     ctx.strokeStyle = "#3f51b5";
                     ctx.lineWidth = 4;
                     ctx.strokeRect(start[0], start[1], end[0] - start[0], end[1] - start[1]);
-                  }
+                  });
                 } else {
                   setPersonDetected(false);
-                  setHasGreeted(false); // Reset on person leaving
+                  setShowButton(false);
+                  setHasSpoken(false);
+                  setIsListening(false);
                 }
               }
               requestAnimationFrame(detectPerson);
@@ -88,17 +104,22 @@ const App = () => {
     }
     setupCamera();
     // eslint-disable-next-line
-  }, [hasGreeted, personDetected]);
+  }, []);
 
+  // Speech Recognition ONLY after welcome is spoken, once!
   function startSpeechRecognition() {
+    if (!isListening) return;
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) return;
+
     const recognition = new SpeechRecognition();
     recognition.lang = "en-US";
     recognition.continuous = false;
     recognition.interimResults = false;
     recognition.start();
+
     recognition.onresult = (event) => {
+      setIsListening(false);
       const text = event.results[0][0].transcript.toLowerCase();
       if (text.includes("yes")) {
         setShowButton(true);
@@ -108,10 +129,13 @@ const App = () => {
         setTimeout(() => {
           speak("Thank you, visit again.");
           setStep("end");
-        }, 600);
+        }, 400);
       }
     };
-    recognition.onerror = () => {};
+
+    recognition.onerror = () => {
+      setIsListening(false);
+    };
   }
 
   function handleCapture() {
@@ -121,7 +145,7 @@ const App = () => {
       speak("Thank you!");
       setStep("end");
       setShowButton(false);
-    }, 700);
+    }, 500);
   }
 
   return (
